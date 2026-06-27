@@ -1,6 +1,7 @@
 # Copyright (c) ModelScope Contributors. All rights reserved.
 from __future__ import annotations
 
+import functools
 import re
 from typing import Any, Dict, List
 
@@ -272,11 +273,20 @@ class AsyncMultiLoraGRPOPipeline(BaseRLPipeline):
         for context_cfg, context in zip(training_context_configs(self.cfg), self.contexts):
             dataset_cfg = context_dataset_config(self.cfg, context_cfg)
             dataloader = DataLoader(
-                dataset=lambda context_cfg=context_cfg: self.build_dataset(context_cfg),
+                # Self-free factory: a lambda closing over ``self`` is unpicklable in
+                # ray mode (the pipeline transitively holds a ``_thread.RLock`` via the
+                # model / rollouter handles), so Ray cannot ship it to the DataLoader
+                # actor. functools.partial over the module-level builder carries only
+                # the (picklable) cfg + context_cfg.
+                dataset=functools.partial(_build_dataset, self.cfg, context_cfg),
                 batch_size=int(dataset_cfg.batch_size),
                 min_batch_size=int(dataset_cfg.batch_size),
                 device_mesh=self.model_mesh,
                 remote_group='model',
+                # Unique per-tenant actor id; otherwise every tenant's DataLoader is
+                # created from this same call site -> identical auto-generated Ray
+                # actor name -> "name ... is already taken" when >1 context exists.
+                instance_id=f'{context_cfg.adapter_name}_',
             )
             feeders.append(
                 PromptFeeder(
@@ -289,31 +299,10 @@ class AsyncMultiLoraGRPOPipeline(BaseRLPipeline):
         return feeders
 
     def build_dataset(self, context_cfg):
-        from twinkle.dataset import Dataset, DatasetMeta
-        from twinkle.preprocessor.llm import GSM8KProcessor
-
-        dataset_cfg = context_dataset_config(self.cfg, context_cfg)
-        data_slice = range(int(dataset_cfg.data_num)) if dataset_cfg.get('data_num') else None
-        dataset = Dataset()
-        dataset.add_dataset(
-            DatasetMeta(
-                dataset_cfg.dataset_id,
-                subset_name=dataset_cfg.get('subset_name'),
-                split=dataset_cfg.get('split', 'train'),
-                data_slice=data_slice,
-            )
-        )
-        template_cfg = self.cfg.model.template
-        dataset.set_template(
-            template_cfg.cls,
-            model_id=context_cfg.base_model_id,
-            max_length=template_cfg.get('max_length', 4096),
-            truncation_strategy=template_cfg.get('truncation_strategy', 'delete'),
-            enable_thinking=template_cfg.get('enable_thinking', False),
-        )
-        dataset.map(GSM8KProcessor(system=dataset_cfg.system_prompt))
-        dataset.encode(add_generation_prompt=True)
-        return dataset
+        # Delegates to the module-level builder so the same logic can be shipped to
+        # the remote DataLoader actor without closing over ``self`` (the closure's
+        # _thread.RLock is unpicklable in ray mode). See build_prompt_feeders.
+        return _build_dataset(self.cfg, context_cfg)
 
     def build_reward_registry(self):
         registry = {}
@@ -372,3 +361,38 @@ def grpo_advantage_fn(samples: List[Dict[str, Any]], context) -> tuple[list[floa
     num_generations = max(1, max(int(sample.get('generation_idx', 0)) for sample in samples) + 1)
     advantages = GRPOAdvantage()(rewards, num_generations=num_generations, scale='group').tolist()
     return advantages, rewards
+
+
+def _build_dataset(cfg, context_cfg):
+    """Module-level (self-free) dataset builder.
+
+    Kept out of the pipeline instance so build_prompt_feeders can hand a
+    ``functools.partial(_build_dataset, cfg, context_cfg)`` to the remote
+    DataLoader actor — closing over ``self`` instead is unpicklable in ray mode
+    (the pipeline holds a ``_thread.RLock`` via the model / rollouter handles).
+    """
+    from twinkle.dataset import Dataset, DatasetMeta
+    from twinkle.preprocessor.llm import GSM8KProcessor
+
+    dataset_cfg = context_dataset_config(cfg, context_cfg)
+    data_slice = range(int(dataset_cfg.data_num)) if dataset_cfg.get('data_num') else None
+    dataset = Dataset()
+    dataset.add_dataset(
+        DatasetMeta(
+            dataset_cfg.dataset_id,
+            subset_name=dataset_cfg.get('subset_name'),
+            split=dataset_cfg.get('split', 'train'),
+            data_slice=data_slice,
+        )
+    )
+    template_cfg = cfg.model.template
+    dataset.set_template(
+        template_cfg.cls,
+        model_id=context_cfg.base_model_id,
+        max_length=template_cfg.get('max_length', 4096),
+        truncation_strategy=template_cfg.get('truncation_strategy', 'delete'),
+        enable_thinking=template_cfg.get('enable_thinking', False),
+    )
+    dataset.map(GSM8KProcessor(system=dataset_cfg.system_prompt))
+    dataset.encode(add_generation_prompt=True)
+    return dataset
