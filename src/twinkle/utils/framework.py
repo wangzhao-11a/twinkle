@@ -49,7 +49,14 @@ class Framework(ABC):
                 # ``dist.all_gather_object(...)``. Reuse Megatron's dedicated Gloo
                 # DP group instead. When CP is enabled we must pick the DP+CP
                 # variant, otherwise the rank span for metric aggregation is wrong.
-                if importlib.util.find_spec('megatron.core') is not None:
+                try:
+                    _twk_has_megatron = importlib.util.find_spec('megatron.core') is not None
+                except ModuleNotFoundError:
+                    # find_spec('megatron.core') RAISES (not returns None) when the
+                    # parent package 'megatron' is absent — e.g. the Transformers /
+                    # vLLM-only NPU container. Treat that as "no megatron".
+                    _twk_has_megatron = False
+                if _twk_has_megatron:
                     from megatron.core import parallel_state as mpu
                     if mpu.model_parallel_is_initialized():
                         process_group = mpu.get_data_parallel_group_gloo(
