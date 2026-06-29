@@ -63,6 +63,18 @@ class AsyncRollouter:
         self.active_rollout_tasks: set[asyncio.Task] = set()
         self._last_rollout_submit_time: Dict[str, float] = defaultdict(float)
         self._submitted_prompt_groups: Dict[str, int] = defaultdict(int)
+        self._external_capacity = None
+
+    def update_capacity(self, capacity) -> None:
+        """C-line (BaseRLPipeline) push hook for rollout capacity (spec FR-005).
+
+        Reserved interface: stores an externally-pushed ``RolloutCapacity``. Wiring it
+        into the per-context decision (so it overrides the StalenessManager computation
+        in pick_next_rollout_context) is deferred to the A/B/C interface freeze; until
+        something calls this, ``_external_capacity`` stays None and the rollouter keeps
+        computing capacity itself, so this is fully non-breaking.
+        """
+        self._external_capacity = capacity
 
     def enqueue_prompt_groups(self, context: TrainingContext, prompt_groups: Iterable[SampleRecord]) -> None:
         """Append rollout inputs for a context.
@@ -139,7 +151,14 @@ class AsyncRollouter:
         trajectory = prompt_group.get('trajectory') or prompt_group
         self.adapter_registry.on_rollout_started(context)
         try:
-            rollout_kwargs = {'tool_manager': tool_manager, 'adapter_name': context.adapter_name}
+            rollout_kwargs = {
+                'tool_manager': tool_manager,
+                'adapter_name': context.adapter_name,
+                # vLLM multi-LoRA routing / version tag (spec FR-005, acceptance #6).
+                # ServerSingleTurnRollout already reads kwargs['policy_version'] but the
+                # caller never supplied it, so it was always None. Default is 0 (train_0).
+                'policy_version': context.policy_version,
+            }
             if context.adapter_revision is not None:
                 rollout_kwargs['adapter_path'] = context.adapter_revision
             result = self.rollout([trajectory], **rollout_kwargs)

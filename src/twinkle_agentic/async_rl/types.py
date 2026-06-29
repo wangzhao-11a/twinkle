@@ -170,6 +170,43 @@ class RolloutCapacity:
     def can_submit(self) -> bool:
         return self.available_groups > 0 and self.action == 'submit'
 
+    # --- spec FR-003 compatibility aliases (canonical fields are above) ---
+    @property
+    def available_slots(self) -> int:
+        return self.available_groups
+
+    @property
+    def should_sleep(self) -> bool:
+        return self.action == 'sleep'
+
+    @property
+    def should_throttle(self) -> bool:
+        # staleness.py flags the near-watermark case with this reason (still submits).
+        return self.reason == 'near_staleness_limit'
+
+
+@dataclass
+class RolloutGroupRequest:
+    """FR-011 partial-rollout interface reservation (spec §3.11).
+
+    Not consumed yet (run_one_group currently takes ``(context, sample)``); the
+    fields are reserved so partial rollout can be added later without a breaking
+    data-protocol change.
+    """
+    context: Any = None
+    sample: Any = None
+    partial_state: Optional[Any] = None
+    abort_count: int = 0
+    protected: bool = False
+
+
+@dataclass
+class RolloutGroupResult:
+    """FR-011 partial-rollout interface reservation (spec §3.11)."""
+    metadata: Any = None
+    status: str = 'ok'  # ok / timeout / aborted / failed
+    loss_mask: Optional[Any] = None
+
 
 @dataclass
 class RolloutContextState:
