@@ -696,7 +696,7 @@ class InputProcessor:
                 elif key == 'position_ids' and is_mm_position_ids(values[0]):
                     result[key] = InputProcessor._pad_sequence(values, self.padding_map[key], self.padding_side)
                     result[key] = result[key].reshape(values[0].shape[0], len(values), -1)
-                elif isinstance(values[0], torch.Tensor):
+                elif isinstance(values[0], torch.Tensor) and key in self.padding_map:
                     result[key] = InputProcessor._pad_sequence(values, self.padding_map[key], self.padding_side)
                     if result[key].dim() == 1:
                         result[key] = result[key].unsqueeze(0)

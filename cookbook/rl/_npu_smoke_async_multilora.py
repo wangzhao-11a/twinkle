@@ -38,6 +38,13 @@ MAX_STEPS = int(os.environ.get('MAX_STEPS', 2))
 NUM_GENERATIONS = int(os.environ.get('NUM_GENERATIONS', 4))
 DATA_NUM = int(os.environ.get('DATA_NUM', 16))
 LORA_RANK = int(os.environ.get('LORA_RANK', 8))
+# 'Template' (base, tokenizer chat_template) for text Qwen3; 'Qwen3_5Template' for the
+# Qwen3.5 VL/mrope arch. Env-switchable so one driver serves both models.
+TEMPLATE_CLS = os.environ.get('TEMPLATE_CLS', 'Template')
+# Qwen3.5's GatedDeltaNet (GDN linear attention) cannot use padding_free/packed inputs
+# without flash-linear-attention (which doesn't build on NPU). Set PADDING_FREE=0 for
+# GDN models; default 1 is fine for standard-attention models like Qwen3-0.6B.
+PADDING_FREE = os.environ.get('PADDING_FREE', '1') == '1'
 
 # Collected by the instrumented advantage fn (runs in-driver), asserted in main().
 _VERIFY_RECORDS: list = []
@@ -170,7 +177,7 @@ class NpuTransformersGRPOPipeline(AsyncMultiLoraGRPOPipeline):
             model.set_loss(
                 self.cfg.model.loss.cls, adapter_name=cc.adapter_name,
                 epsilon=float(self.cfg.model.loss.get('epsilon', 0.2)))
-            model.set_processor(InputProcessor, padding_free=True, adapter_name=cc.adapter_name)
+            model.set_processor(InputProcessor, padding_free=PADDING_FREE, adapter_name=cc.adapter_name)
             model.set_template(
                 self.cfg.model.template.cls, model_id=primary.base_model_id, adapter_name=cc.adapter_name,
                 enable_thinking=False)
@@ -267,14 +274,14 @@ def build_cfg():
             'optimizer': {'cls': 'AdamW', 'lr': 1.0e-5},
             'lr_scheduler': {'cls': 'CosineAnnealingLR', 'lr_decay_steps': MAX_STEPS, 'max_lr': 1.0e-5},
             'processor': {'cls': 'InputProcessor'},
-            'template': {'cls': 'Template', 'max_length': 2048, 'truncation_strategy': 'delete',
+            'template': {'cls': TEMPLATE_CLS, 'max_length': 2048, 'truncation_strategy': 'delete',
                          'enable_thinking': False},
             'adapter_checkpoint_dir': 'output/npu_smoke/lora_sync',
         },
         'sampler': {
             'engine_args': {'gpu_memory_utilization': 0.3, 'max_model_len': 2048, 'max_lora_rank': max(8, LORA_RANK),
                             'max_loras': 4, 'enable_lora': True, 'enforce_eager': True},
-            'template': {'cls': 'Template', 'enable_thinking': False},
+            'template': {'cls': TEMPLATE_CLS, 'enable_thinking': False},
             'sampling_params': {'max_tokens': 512, 'num_samples': 1, 'logprobs': 1, 'temperature': 1.0, 'top_p': 0.95},
             'num_generations': NUM_GENERATIONS,
         },
